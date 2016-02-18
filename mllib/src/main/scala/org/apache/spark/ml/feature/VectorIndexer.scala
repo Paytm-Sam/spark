@@ -35,7 +35,7 @@ import org.apache.spark.sql.types.{StructField, StructType}
 import org.apache.spark.util.collection.OpenHashSet
 
 /** Private trait for params for VectorIndexer and VectorIndexerModel */
-private[ml] trait VectorIndexerParams extends Params with HasInputCol with HasOutputCol {
+private[ml] trait VectorIndexerParams extends Params with HasInputCol with HasOutputCol with HasHandleInvalid {
 
   /**
    * Threshold for the number of values a categorical feature can take.
@@ -96,6 +96,10 @@ class VectorIndexer(override val uid: String) extends Estimator[VectorIndexerMod
   with VectorIndexerParams {
 
   def this() = this(Identifiable.randomUID("vecIdx"))
+
+  /** @group setParam */
+  def setHandleInvalid(value: String): this.type = set(handleInvalid, value)
+  setDefault(handleInvalid, "error")
 
   /** @group setParam */
   def setMaxCategories(value: Int): this.type = set(maxCategories, value)
@@ -337,12 +341,27 @@ class VectorIndexerModel private[ml] (
   /** @group setParam */
   def setOutputCol(value: String): this.type = set(outputCol, value)
 
+  /** @group setParam */
+  def setHandleInvalid(value: String): this.type = set(handleInvalid, value)
+  setDefault(handleInvalid, "error")
+
   override def transform(dataset: DataFrame): DataFrame = {
     transformSchema(dataset.schema, logging = true)
     val newField = prepOutputField(dataset.schema)
+
+    val filteredDataset = (getHandleInvalid) match {
+       case "skip" => {
+         val filterer = udf { label: Vector =>
+           categoryMaps.forall { case (index, categoryMap) => categoryMap.contains(label(index)) }
+        }
+         dataset.where(filterer(dataset($(inputCol))))
+       }
+       case _ => dataset
+     }
+
     val transformUDF = udf { (vector: Vector) => transformFunc(vector) }
-    val newCol = transformUDF(dataset($(inputCol)))
-    dataset.withColumn($(outputCol), newCol.as($(outputCol), newField.metadata))
+    val newCol = transformUDF(filteredDataset($(inputCol)))
+    filteredDataset.withColumn($(outputCol), newCol.as($(outputCol), newField.metadata))
   }
 
   override def transformSchema(schema: StructType): StructType = {
